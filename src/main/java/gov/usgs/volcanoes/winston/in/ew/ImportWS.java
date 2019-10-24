@@ -1,8 +1,6 @@
 package gov.usgs.volcanoes.winston.in.ew;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.List;
@@ -30,6 +28,10 @@ import gov.usgs.volcanoes.core.util.StringUtils;
 import gov.usgs.volcanoes.winston.db.Channels;
 import gov.usgs.volcanoes.winston.db.Data;
 import gov.usgs.volcanoes.winston.db.WinstonDatabase;
+import io.prometheus.client.CollectorRegistry;
+import io.prometheus.client.Counter;
+import io.prometheus.client.Gauge;
+import io.prometheus.client.exporter.PushGateway;
 
 /**
  *
@@ -41,6 +43,7 @@ public class ImportWS {
   private static final String DEFAULT_CONFIG_FILENAME = "ImportWS.config";
   private static final double DEFAULT_CHUNK_SIZE = 600.0;
   private static final int DEFAULT_CHUNK_DELAY = 500;
+  private static final String DEFAULT_PUSHGATEWAY = null;
 
   private static final boolean DEFAULT_RSAM_ENABLE = true;
   private static final int DEFAULT_RSAM_DELTA = 10;
@@ -68,6 +71,11 @@ public class ImportWS {
 
   private double chunkSize;
   private int chunkDelay;
+
+  private String pushGateway;
+  private final CollectorRegistry registry;
+  private final Gauge.Timer durationTimer;
+
 
   private boolean rsamEnable;
   private int rsamDelta;
@@ -104,6 +112,11 @@ public class ImportWS {
 
   public ImportWS() {
     appTimer = new CodeTimer("application");
+    registry = new CollectorRegistry();
+    Gauge duration = Gauge.build()
+        .name("importws_duration_seconds").help("Duration of ImportWS run in seconds.")
+        .register(registry);
+    durationTimer = duration.startTimer();
   }
 
   public ImportWS(final String fileName) throws ParseException {
@@ -170,7 +183,9 @@ public class ImportWS {
     rsamDuration =
         StringUtils.stringToInt(config.getString("rsam.duration"), DEFAULT_RSAM_DURATION);
     LOGGER.info("rsamDuration: {}", rsamDuration);
-    // TODO: log level
+
+    pushGateway = StringUtils.stringToString(config.getString("pushGateway"), DEFAULT_PUSHGATEWAY);
+    LOGGER.info("pushGateway: {}", pushGateway);
   }
 
   public void addStats(final int t, final double td, final double ti) {
@@ -178,20 +193,6 @@ public class ImportWS {
     totalDownloadTime += td;
     totalInsertTime += ti;
   }
-
-  // private void parseTimeRange(final String timeRange) {
-  // try {
-  // final double[] tr = Time.parseTimeRange(timeRange);
-  // startTime = tr[0];
-  // endTime = tr[1];
-  // } catch (final Exception e) {
-  // throw new RuntimeException("Error parsing time range: " + e.getMessage());
-  // }
-  //
-  // LOGGER
-  // .info(String.format("Requested time range: [%s -> %s, %s]", J2kSec.toDateString(startTime),
-  // J2kSec.toDateString(endTime), Time.secondsToString(endTime - startTime)));
-  // }
 
   public void setWinston(final WinstonDatabase w) {
     winston = w;
@@ -228,8 +229,11 @@ public class ImportWS {
         if (item.match(ss[0], ss[1], ss[2], loc)) {
           final String wc = item.getSCNSCNL("$");
 
-          if (!createChannels && !channels.channelExists(wc))
+          if (!createChannels && !channels.channelExists(wc)) {
+            LOGGER.info("{} doesn't exist and I'm not creating channels.", wc);
             continue;
+          }
+
 
           LOGGER.info("Remote channel matched: {}", wc);
           final ImportWSJob job = new ImportWSJob(winston, waveServer, this);
@@ -264,13 +268,14 @@ public class ImportWS {
     quit = true;
   }
 
-  public void go() {
+  public void go() throws InterruptedException {
     final Thread launchThread = new Thread(new Runnable() {
       public void run() {
         startImport();
       }
     });
     launchThread.start();
+    launchThread.join();
   }
 
   public void quit() {
@@ -313,7 +318,40 @@ public class ImportWS {
     quit = b;
   }
 
-  public static void main(final String[] args) throws IOException, JSAPException, ParseException {
+  private void pushMetrics() {
+    if (pushGateway == null) {
+      return;
+    }
+    
+    LOGGER.info("Pushing metrics to {}", pushGateway);
+    
+    Counter.build().name("totalInserted").help("Tracebufs inserted.").register(registry)
+        .inc(totalInserted);
+
+    Counter.build().name("totalDownloadTime").help("Total Download Time.").register(registry)
+        .inc(totalDownloadTime);
+
+    Counter.build().name("totalInsertTime").help("Total Insert Time.").register(registry)
+        .inc(totalInsertTime);
+
+    Gauge.build().name("importws_last_success").help("Last time ImportWS succeeded, in unixtime.")
+        .register(registry).setToCurrentTime();
+
+    durationTimer.setDuration();
+
+    PushGateway pg = new PushGateway(pushGateway);
+
+    try {
+      pg.pushAdd(registry, "ImportWS");
+    } catch (IOException e) {
+      LOGGER.error("Unable to push metrics to {}: {}", pushGateway, e.getMessage());
+      e.printStackTrace();
+    }
+  }
+
+
+  public static void main(final String[] args)
+      throws IOException, JSAPException, ParseException, InterruptedException {
     final JSAPResult config = getArguments(args);
     final ImportWS w = new ImportWS(config.getString("configFilename"));
 
@@ -324,21 +362,13 @@ public class ImportWS {
     if (config.getString("waveServer") != null)
       w.waveServer = new WaveServer(config.getString("waveServer"));
 
-    final boolean acceptCommands = !(config.getBoolean("noInput"));
+    final boolean acceptCommands = !(System.console() == null || config.getBoolean("noInput"));
 
     w.setRequestSCNL((config.getBoolean("SCNL")));
 
     w.createJobs();
     w.go();
-    final BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
-
-    while (acceptCommands && !w.quit) {
-      String s = in.readLine();
-      if (s != null) {
-        s = s.toLowerCase().trim();
-        if (s.equals("q"))
-          w.quit();
-      }
-    }
+    w.pushMetrics();
+    System.exit(0);
   }
 }

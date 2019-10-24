@@ -17,6 +17,7 @@ import gov.usgs.volcanoes.core.time.TimeSpan;
 import gov.usgs.volcanoes.winston.db.Channels;
 import gov.usgs.volcanoes.winston.db.InputEW;
 import gov.usgs.volcanoes.winston.db.WinstonDatabase;
+import io.prometheus.client.CollectorRegistry;
 
 /**
  * If a span is added to the job it is an explicit guarantee that there is
@@ -125,7 +126,8 @@ public class ImportWSJob {
         ct += chunkSize;
         final double ret = Math.min(ct + chunkSize + 5, t2 + 5);
         final CodeTimer netTimer = new CodeTimer("net");
-        LOGGER.debug("REQUESTING: {}_{}_{}_{} {}-{}",ss[0], ss[1], ss[2], loc, J2kSec.toDateString(ct - 5),
+        LOGGER.debug("REQUESTING: {}_{}_{}_{} {}-{}", ss[0], ss[1], ss[2], loc,
+            J2kSec.toDateString(ct - 5),
             J2kSec.toDateString(ret));
         tbs = waveServer.getTraceBufs(ss[0], ss[1], ss[2], loc, Time.j2kToEw(ct - 5),
             Time.j2kToEw(ret));
@@ -288,6 +290,4 @@ public class ImportWSJob {
     waveServer.close();
     spans.clear();
   }
-
-
 }

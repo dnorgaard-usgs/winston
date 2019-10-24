@@ -36,6 +36,7 @@ import gov.usgs.volcanoes.core.util.UtilException;
  */
 public class Data {
   private static final Logger LOGGER = LoggerFactory.getLogger(Data.class);
+  private static final double EPSILON = 0.01;
 
   private static final int ONE_DAY = 60 * 60 * 24;
   private final WinstonDatabase winston;
@@ -218,10 +219,9 @@ public class Data {
         gaps.add(new double[] {t1, bufs.get(0)[0]});
       }
       double last = bufs.get(0)[1];
-      double epsilon = 0.01;
       for (int i = 1; i < bufs.size(); i++) {
         final double[] buf = bufs.get(i);
-        if (buf[0] - last > epsilon) {
+        if (buf[0] - last > EPSILON) {
           double start = last;
           double end = buf[0];
           if (end < t1)
@@ -268,6 +268,7 @@ public class Data {
 
     if (!winston.useDatabase(code)) {
       // database didn't exist so the whole thing must be a gap
+      LOGGER.info("didn't find channel {}", code);
       gaps.add(timeSpan);
       return gaps;
     }
@@ -282,7 +283,8 @@ public class Data {
     for (final String day : days) {
       List<double[]> bufs;
       try {
-        bufs = getBufTimes(code, day);
+        String table = code + "$$" + day;
+        bufs = getBufTimes(code, table);
       } catch (SQLException e) {
         LOGGER.error("Unable to read day table {}:{}", code, day);
         bufs = new ArrayList<double[]>();
@@ -293,15 +295,16 @@ public class Data {
           continue;
         }
 
-        if (buf[0] > last) {
+        if (buf[0] - last > EPSILON) {
           gaps.add(new TimeSpan(J2kSec.asEpoch(last), J2kSec.asEpoch(buf[0])));
         }
         last = buf[1];
       }
     }
-
+    
     if (last < endJ2k) {
       gaps.add(new TimeSpan(J2kSec.asEpoch(last), timeSpan.endTime));
+
     }
 
     return gaps;
@@ -314,6 +317,7 @@ public class Data {
     }
 
     String sql = String.format("SELECT st, et FROM `%s` ORDER BY st ASC", table);
+
     final ResultSet rs = winston.getStatement().executeQuery(sql);
     while (rs.next()) {
       final double start = rs.getDouble(1);
